@@ -1,0 +1,291 @@
+---
+title: "Untitled"
+author: "Eivind Vinsand,"
+date: "2 12 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse) # For a tidyer code
+library(BatchGetSymbols) # Get Stock data from Yahoo
+library(formattable) # Format as percent
+library(scales) # To format number as millions
+library(shiny)
+library(quantmod)
+library(highcharter)
+library(shinythemes)
+library(reactable)
+library(tbl2xts)
+library(argonDash)
+```
+
+Problem description
+
+In this script, we will create a dynamic shiny app. The app will include a dashboard with a range of
+different stock related statistics. It will have compelling visualizations and
+possibility to interact with the data. Furthermore, we would like to create an
+option for the user to select different stocks to a portfolio and see how this
+portfolio has performed in a user-selected period.
+
+The script is divided into X parts:
+1. Webscraping ticker and company names
+2. Fetching stock data from Yahoo Finance
+3. Creating content for
+4. XXX
+
+
+
+Part 1: Webscraping ticker and company names
+
+We will use webscraping to get the tickers and company names for all Norwegian stocks. The ticker and company names will be scraped from gurufocus.com.
+Since only 100 stocks are displayed per page, we need to:
+a) Find out how many pages to scrape
+b) Get the URL for each page
+c) Scrape all the pages
+d) cleaning the data
+
+
+```{r, 1a) - Find out how many pages to scrape}
+# First page of stocks
+base_url = "https://www.gurufocus.com/stock_list.php?m_country[]=NOR&p=50&p=0&n=100" 
+
+# CSS element for number of Norwegian stocks listed 
+total_records_selector = "#ajax_content strong" 
+
+# Scraping total number of stocks listed on the page
+total_records <- read_html(base_url) %>% 
+  html_nodes(total_records_selector) %>% 
+  html_text()
+
+# Calculating number of pages to scrape (Number of stocks/100 stocks per page)
+total_pages <- ceiling(as.numeric(head(total_records,1))/100) # Total number of pages
+
+cat("Total pages to scrape:",total_pages)
+```
+
+
+```{r, 1b) - Get the URL for each page}
+# Creating a vector of page numbers
+page_vector <- c(0:(total_pages-1)) 
+
+# Splitting base URL into two parts (excluduing page number)
+url1 = "https://www.gurufocus.com/stock_list.php?m_country[]=NOR&p=50&p="
+url2 = "&n=100"
+
+# Generating URL for each page to scrape
+for (page in page_vector){
+  url <- paste(url1,page_vector,url2, sep ="") # Creating URL
+  url_list <- url #Adding URL to list
+}
+
+url_list # List of URLs to scrape
+```
+
+
+```{r , 1c) - Scrape all the pages}
+# CSS Element for ticker name and company name
+ticker_selector = ".text .nav" # CSS selector
+company_selector = ".text+ td a" # CSS selector
+
+# Creating an empty tibble to store data in
+stock_data <- tibble(tickers = as.character(),
+                     company_name = as.character())
+
+# Scraping ticker and company names
+for(i in seq_along(url_list)){
+  
+  tickers <- read_html(url_list[i]) %>% 
+  html_nodes(ticker_selector) %>%
+  html_text()
+  
+  company_name <- read_html(url_list[i]) %>% 
+  html_nodes(company_selector) %>%
+  html_text()
+  
+  stock_data <- stock_data %>% 
+    add_row(tickers = tickers,
+            company_name = company_name)
+}
+
+stock_data
+```
+
+
+```{r, 1d) - Cleaning the data}
+stock_data <- stock_data[grepl('Norway', stock_data$tickers), ] # Removing redundant rows
+yahoo_tickers <- str_replace(stock_data$tickers,"Norway", "OL" ) # Formating tickers to Yahoo format
+
+stock_data <- stock_data %>% transmute(ticker = yahoo_tickers,
+                                    company_name = company_name)  # Replacing tickers with Yahoo tickers
+stock_data
+```
+
+Part 2: Fetching stock data from Yahoo Finance
+
+To get historical stock data about our stocks, we will use the quantmode package to extract data  from Yahoo Finance. We will use the BatchGetSymbols function to get the stock data in a more tidy format.
+
+
+```{r, 2 - Loading Stock data, include=FALSE}
+start_date <- Sys.Date() - 365 # First date of data to retrieve 
+end_date <- Sys.Date()  # Last date of data to retrieve
+
+portfolio_data <- BatchGetSymbols(tickers = stock_data$ticker,
+                         first.date = start_date,
+                         last.date = end_date,
+                         freq.data = "daily",
+                         bench.ticker = "^OSEBX",
+                         cache.folder = file.path(tempdir(),
+                                                  'BGS_Cache') ) # cache in tempdir()
+benchmark_data <- getSymbols.yahoo("^OSEBX",
+                             first.date = start_date,
+                             last.date = end_date,
+                             auto.assign=FALSE)
+
+portfolio_data2 <- portfolio_data$df.tickers
+
+  
+```
+
+```{r}
+hchart(benchmark_data, type = "ohlc") %>% 
+  hc_add_theme(hc_theme_db())
+
+
+```
+
+Part 3: Creating tables for the dashboard
+ We want to create four tables showing daily data of:
+ a) The most traded stocks
+ b) Winners
+ c) Loser
+ d) Hot Stocks (Stocks with volume anomaly)
+
+
+```{r, 3 - Creating data tables}
+last_data <- portfolio_data2
+last_data[last_data==0] <- NA
+last_data <- subset(last_data, startsWith(as.character(ref.date), "2020"))
+last_data <- last_data%>%
+  group_by(ticker) %>%
+  mutate(AvgVolume = mean(volume*price.close)) %>% 
+  summarise_all(last)
+last_data <- left_join(last_data, stock_data, by = "ticker") 
+
+market_data <- last_data %>%
+  transmute(Company = company_name,
+            Last = price.close,
+            High = price.high,
+            Low = price.low,
+            "+/- %" = (price.close-price.open)/price.open,
+            "+/- NOK" = (price.close-price.open),
+            Volume = volume*price.close)
+  
+  
+last_data <-   last_data %>% 
+  transmute(Company = company_name,
+            "+/- %" = (price.close-price.open)/price.open,
+            Last = price.close,
+            Volume = volume*price.close,
+            AvgVolume = AvgVolume)
+
+# a) The most traded stocks
+top_vol <- last_data[-5]%>% 
+  arrange(desc(last_data$Volume)) %>% 
+  mutate(Volume = unit_format(unit = 'M', scale = 1e-6, digits =2)(Volume),
+         `+/- %` = percent(`+/- %`))%>% 
+  head(10)
+top_vol
+
+# b) Winners
+winners <- last_data[-5] %>% 
+  arrange(desc(last_data$`+/- %`)) %>% 
+  mutate(Volume = unit_format(unit = 'M', scale = 1e-6, digits =2)(Volume),
+         `+/- %` = percent(`+/- %`))%>% 
+  head(10)
+winners
+
+# c) Losers
+losers <- last_data[-5] %>% 
+  arrange(last_data$`+/- %`) %>% 
+  mutate(Volume = unit_format(unit = 'M', scale = 1e-6, digits =2)(Volume),
+         `+/- %` = percent(`+/- %`))%>% 
+  head(10)
+losers
+
+
+#d) Hot Stocks
+hot_stock <- last_data %>% 
+  mutate(Ratio = Volume/AvgVolume) %>% 
+  arrange(desc(Ratio)) %>% 
+  mutate(Volume = unit_format(unit = 'M', scale = 1e-6, digits =2)(Volume),
+         Ratio = percent(Ratio)) %>% 
+  head(10)
+hot_stock <- hot_stock[c(1,3,6)]
+hot_stock
+
+```
+
+```{r, Portfolio maker}
+# Users selected stocks
+my_stocks <- c("Norwegian Air Shuttle ASA", "Havila Shipping ASA", "Axactor SE") 
+
+#Users Stocks
+cost_price <- c(2,2,2) # Users cost price
+quantity <- c(409, 14, 30) # Users quantity
+
+
+# Table for your stock portfolio overview
+my_portfolio <- last_data[last_data$Company %in% my_stocks, ][-5] %>%
+  transmute(Company = Company,
+         `Cost Price` = cost_price,
+         Quantity = quantity,
+         `Market Price` = Last,
+         `Market Value` = Last*quantity,
+         `Profit (%)` = percent((Last-cost_price)/cost_price),
+         `Weight (%)` = percent(`Market Value`/sum(`Market Value`)))
+         
+my_portfolio
+
+
+# Create a pie chart of the portfolio weights
+# weights_pie <- my_portfolio%>% 
+#   hchart("pie", hcaes(x = Company, y = `Weight (%)`)) %>% 
+#   hc_title(text = "Axactor Stock Price")
+#     
+# 
+# weights_pie
+
+```
+
+
+
+```{r, Plotting chart for each stock}
+
+# Spliting the stock data into a list of data frames for each stock
+stock_list <- portfolio_data2 %>%
+  rename(date = ref.date) %>%
+  split(portfolio_data2 , f = portfolio_data2$ticker)
+
+
+# Creating xts object for a stocks historical data
+plot_data <- as.data.frame(stock_list[["AXA.OL"]]) %>%
+tbl_xts()
+
+
+# Creating highcharter plot using the xts object
+plot <- hchart(plot_data, type = "ohlc") %>%
+  hc_title(text = "Axactor Stock Price") %>%
+  hc_add_theme(hc_theme_db())
+plot
+
+
+# NB! Here we should create a function that creates a plot for
+# selected stocks (maybe a hyperlink on each stock name in the list will bring us
+# to a page of stock name, historical profit and a the price plot, beta, alpha etc.)
+
+
+```
+
+
+
